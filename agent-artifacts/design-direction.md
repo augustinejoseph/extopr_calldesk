@@ -1,0 +1,9 @@
+# Central design direction
+
+Theme and all component styles: ../app/globals.css. The :root block holds the brand, canvas, surface, text, line, danger, font, radius, sidebar width and shadow tokens. Components inherit these tokens; change the token block first for rebranding.
+
+Direction: calm operational workspace. Forest green primary actions, warm off-white canvas, thin borders, generous space, restrained status colors. Typography uses the platform’s Arial/Helvetica sans family without external font requests. Student lists emphasize names, phone numbers, status, owner and next action. No decorative imagery competes with calling work.
+
+Desktop: persistent route navigation and compact breadcrumb. Summary cards and the status breakdown live only on the dedicated Overview page. Operational pages begin directly with their filters and work area. Mobile: sticky horizontally scrolling route navigation, two-column cards on Overview only, full-width primary action, scrollable student table and full-height details drawer. Breakpoints: 1100 px and 700 px.
+
+Text fields retain native labeled controls and visible focus rings. Every dropdown uses components/dropdown.js, styled centrally through .dropdown* rules in app/globals.css. Menus use surface/brand/line/shadow tokens, display the current selection with a check, and render in a portal to avoid panel clipping. They support arrow keys, Home/End, Enter/Space, type-ahead, Escape, touch/pointer selection, disabled options, required mappings and form reset. Labels and ARIA combobox/listbox semantics identify each control. DNC always combines red text with an explicit DO NOT DIAL label. Follow-ups use a text warning as well as color. Dialog closes through its visible button, Escape, or backdrop; keyboard focus is trapped and restored on dismissal.
