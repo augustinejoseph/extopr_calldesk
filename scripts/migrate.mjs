@@ -1,3 +1,4 @@
+import "../lib/env.mjs";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 if (!process.env.DATABASE_URL) throw Error("Set DATABASE_URL");

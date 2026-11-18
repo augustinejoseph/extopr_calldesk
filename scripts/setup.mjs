@@ -1,3 +1,4 @@
+import "../lib/env.mjs";
 import { readFile } from "node:fs/promises";
 import { scryptSync, randomBytes } from "node:crypto";
 import postgres from "postgres";
