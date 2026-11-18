@@ -1,0 +1,26 @@
+{
+  "id": "c8a9327e-d4d8-457e-9d65-2e6a812768c0",
+  "status": "completed",
+  "total_rows": 21627,
+  "created": 21435,
+  "review": 188,
+  "sources": 21623,
+  "errors": [
+    {
+      "row": 4599,
+      "error": "Phone must contain 10–15 digits"
+    },
+    {
+      "row": 13322,
+      "error": "Phone must contain 10–15 digits"
+    },
+    {
+      "row": 15416,
+      "error": "Phone must contain 10–15 digits"
+    },
+    {
+      "row": 18337,
+      "error": "Phone must contain 10–15 digits"
+    }
+  ]
+}

@@ -1,28 +1,140 @@
+import { pagination } from "../../../lib/pagination.mjs";
 import { prepareRow } from "../../../lib/import.mjs";
 import { db } from "../../../lib/db.mjs";
 import { currentUser, sameOrigin, hashPassword } from "../../../lib/auth.mjs";
 import { canAccess, validateOutcome } from "../../../lib/policy.mjs";
-export async function GET() {
+export async function GET(request) {
   const user = await currentUser();
   if (!user)
     return Response.json({ error: "Sign in required" }, { status: 401 });
   const sql = db();
-  const students =
-    await sql`select s.*,u.name as owner_name from students s left join users u on u.id=s.owner_id where ${user.role === "manager"} or s.owner_id=${user.id} order by s.created_at desc`;
-  const activities =
-    await sql`select a.*,u.name as author from activities a join users u on u.id=a.author_id join students s on s.id=a.student_id where ${user.role === "manager"} or s.owner_id=${user.id} order by a.created_at desc`;
-  const followups =
-    await sql`select f.* from followups f join students s on s.id=f.student_id where ${user.role === "manager"} or s.owner_id=${user.id} order by f.due_at`;
-  const users =
-    user.role === "manager"
-      ? await sql`select id,name,email,role,deleted_at from users order by name`
-      : [];
-  const duplicates =
-    user.role === "manager"
-      ? await sql`select d.*,s.name as candidate_name,s.phone as candidate_phone from duplicate_reviews d left join students s on s.id=d.candidate_id where d.resolved_at is null`
-      : [];
+  const params = new URL(request.url).searchParams;
+  const { page, limit, offset } = pagination(params);
+  const view = params.get("view") || "Students";
+  const detail = params.get("student");
+  if (detail && !/^[0-9a-f-]{36}$/i.test(detail))
+    return Response.json({ error: "Invalid student" }, { status: 400 });
+  const access = sql`(${user.role === "manager"} or s.owner_id=${user.id})`;
+  const search = params.get("search") || "";
+  const status = params.get("status") || "";
+  const follow = params.get("follow") || "";
+  const start = params.get("dayStart"),
+    end = params.get("dayEnd");
+  if (
+    follow === "today" &&
+    (!start ||
+      !end ||
+      !Number.isFinite(Date.parse(start)) ||
+      !Number.isFinite(Date.parse(end)))
+  )
+    return Response.json({ error: "Invalid date range" }, { status: 400 });
+  const filter = sql`${access}
+    and (${view !== "Unassigned pool"} or s.owner_id is null)
+    and (${!status} or s.status=${status})
+    and (${!search} or strpos(lower(concat_ws(' ',s.name,s.phone,s.client,s.course)),lower(${search}))>0)
+    and (${!follow} or exists(select 1 from followups f where f.student_id=s.id and f.completed_at is null
+      and ((${follow === "overdue"} and f.due_at<now()) or (${follow === "today"} and f.due_at>=${start}::timestamptz and f.due_at<${end}::timestamptz))))`;
+  let students = [],
+    activities = [],
+    followups = [],
+    duplicates = [],
+    total = 0;
+  let users = [];
+  if (user.role === "manager" && view === "Team") {
+    const [count] =
+      await sql`select count(*)::int as total from users where role='telecaller'`;
+    total = count.total;
+    users =
+      await sql`select u.id,u.name,u.email,u.role,u.deleted_at,(select count(*)::int from students s where s.owner_id=u.id) as assigned_count from users u where u.role='telecaller' order by u.name,u.id limit ${limit} offset ${offset}`;
+  } else if (
+    user.role === "manager" &&
+    ["Students", "Unassigned pool"].includes(view)
+  ) {
+    users =
+      await sql`select id,name,role,deleted_at from users where role='telecaller' and deleted_at is null order by name,id`;
+  }
+  let stats = {
+    total: 0,
+    interested: 0,
+    unassigned: 0,
+    pending: 0,
+    overdue: 0,
+    calls: 0,
+    statuses: {},
+  };
+  if (view === "Overview" || view === "Follow-ups") {
+    const [counts] =
+      await sql`select count(*)::int as pending,count(*) filter(where f.due_at<now())::int as overdue from followups f join students s on s.id=f.student_id where ${access} and f.completed_at is null`;
+    Object.assign(stats, counts);
+  }
+  if (view === "Overview") {
+    const groups =
+      await sql`select s.status,count(*)::int as count,count(*) filter(where s.owner_id is null)::int as unassigned from students s where ${access} group by s.status`;
+    for (const row of groups) {
+      stats.total += row.count;
+      stats.unassigned += row.unassigned;
+      stats.statuses[row.status] = row.count;
+    }
+    stats.interested = stats.statuses.Interested || 0;
+    if (user.role !== "manager") {
+      const [count] =
+        await sql`select count(*)::int as calls from activities a join students s on s.id=a.student_id where ${access} and a.kind='call'`;
+      stats.calls = count.calls;
+    }
+  }
+  if (["Students", "Unassigned pool"].includes(view)) {
+    const [count] =
+      await sql`select count(*)::int as total from students s where ${filter}`;
+    total = count.total;
+    students =
+      await sql`select s.id,s.name,s.phone,s.client,s.course,s.status,s.owner_id,u.name as owner_name from students s left join users u on u.id=s.owner_id where ${filter} order by s.created_at desc,s.id desc limit ${limit} offset ${offset}`;
+    if (students.length)
+      followups =
+        await sql`select distinct on (student_id) id,student_id,due_at from followups where student_id in ${sql(students.map((s) => s.id))} and completed_at is null order by student_id,due_at,id`;
+  } else if (view === "Follow-ups") {
+    total = stats.pending;
+    followups =
+      await sql`select f.*,s.name as student_name,u.name as owner_name from followups f join students s on s.id=f.student_id left join users u on u.id=s.owner_id where ${access} and f.completed_at is null order by f.due_at,f.id limit ${limit} offset ${offset}`;
+  }
+  let duplicateTotal = 0;
+  if (user.role === "manager") {
+    const [count] =
+      await sql`select count(*)::int as total from duplicate_reviews where resolved_at is null`;
+    duplicateTotal = count.total;
+  }
+  if (view === "Duplicate review" && user.role === "manager") {
+    total = duplicateTotal;
+    duplicates =
+      await sql`select d.*,s.name as candidate_name,s.phone as candidate_phone from duplicate_reviews d left join students s on s.id=d.candidate_id where d.resolved_at is null order by d.id limit ${limit} offset ${offset}`;
+  }
+  let student = null,
+    historyTotal = 0;
+  const historyPage = pagination(params, "historyPage");
+  if (detail) {
+    [student = null] =
+      await sql`select s.*,u.name as owner_name from students s left join users u on u.id=s.owner_id where s.id=${detail} and ${access}`;
+    if (student) {
+      const [count] =
+        await sql`select count(*)::int as total from activities where student_id=${detail}`;
+      historyTotal = count.total;
+      activities =
+        await sql`select a.*,u.name as author from activities a join users u on u.id=a.author_id where a.student_id=${detail} order by a.created_at desc,a.id desc limit ${limit} offset ${historyPage.offset}`;
+    }
+  }
   return Response.json(
-    { user, students, activities, followups, users, duplicates },
+    {
+      user,
+      students,
+      student,
+      activities,
+      followups,
+      users,
+      duplicates,
+      duplicateTotal,
+      stats,
+      pagination: { page, limit, total },
+      historyPagination: { page: historyPage.page, limit, total: historyTotal },
+    },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

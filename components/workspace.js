@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { statuses } from "../lib/policy.mjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -7,6 +7,33 @@ import { workspacePages } from "../lib/navigation.mjs";
 import Dropdown from "./dropdown";
 import ImportStudents from "./import-students";
 import { importFields } from "../lib/import.mjs";
+function Pagination({ value, onChange }) {
+  if (!value || value.total <= value.limit) return null;
+  return (
+    <div className="pagination" aria-label="Pagination">
+      <button
+        type="button"
+        className="secondary"
+        disabled={value.page <= 1}
+        onClick={() => onChange(value.page - 1)}
+      >
+        Previous
+      </button>
+      <span>
+        Page {value.page} of {Math.max(1, Math.ceil(value.total / value.limit))}{" "}
+        · {value.total} records
+      </span>
+      <button
+        type="button"
+        className="secondary"
+        disabled={value.page * value.limit >= value.total}
+        onClick={() => onChange(value.page + 1)}
+      >
+        Next
+      </button>
+    </div>
+  );
+}
 const initials = (n) =>
   n
     .split(" ")
@@ -20,6 +47,7 @@ const date = (d) =>
   });
 export default function Workspace({ page, studentId = null }) {
   const router = useRouter();
+  const loadVersion = useRef(0);
   const detail = studentId;
   const setDetail = (id) => router.push(id ? `/students/${id}` : "/students");
   const setPage = (label) =>
@@ -30,6 +58,8 @@ export default function Workspace({ page, studentId = null }) {
     [ready, setReady] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
+    [pageNumber, setPageNumber] = useState(1),
+    [historyPage, setHistoryPage] = useState(1),
     [search, setSearch] = useState(""),
     [status, setStatus] = useState(""),
     [follow, setFollow] = useState(""),
@@ -72,24 +102,63 @@ export default function Workspace({ page, studentId = null }) {
       previous?.focus();
     };
   }, [detail, ready]);
-  async function load() {
-    const r = await fetch("/api/workspace");
+  async function load(signal) {
+    const version = ++loadVersion.current;
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const query = new URLSearchParams({
+      view: page,
+      page: pageNumber,
+      historyPage,
+      search,
+      status,
+      follow,
+      dayStart: dayStart.toISOString(),
+      dayEnd: dayEnd.toISOString(),
+    });
+    if (detail) query.set("student", detail);
+    const r = await fetch(`/api/workspace?${query}`, { signal });
     const d = await r.json();
-    if (r.ok) setData(d);
-    else if (r.status === 401) {
+    if (version !== loadVersion.current || signal?.aborted) return;
+    if (r.ok) {
+      const last = Math.max(
+        1,
+        Math.ceil(d.pagination.total / d.pagination.limit),
+      );
+      if (pageNumber > last) setPageNumber(last);
+      const lastHistory = Math.max(
+        1,
+        Math.ceil(d.historyPagination.total / d.historyPagination.limit),
+      );
+      if (historyPage > lastHistory) setHistoryPage(lastHistory);
+      setData(d);
+    } else if (r.status === 401) {
       setData(null);
       if (page !== "Login") router.replace("/login");
     } else setError(d.error);
     setReady(true);
   }
   useEffect(() => {
-    load().catch(() => {
-      setError("Unable to connect");
-      setReady(true);
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () =>
+        load(controller.signal).catch((e) => {
+          if (e.name === "AbortError") return;
+          setError("Unable to connect");
+          setReady(true);
+        }),
+      200,
+    );
     if ("serviceWorker" in navigator)
       navigator.serviceWorker.register("/sw.js").catch(() => {});
-  }, []);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+      loadVersion.current++;
+    };
+  }, [page, pageNumber, historyPage, search, status, follow, detail]);
   useEffect(() => {
     if (!data?.user?.id) return;
     const refresh = () => load().catch(() => {});
@@ -99,7 +168,16 @@ export default function Workspace({ page, studentId = null }) {
       clearInterval(timer);
       window.removeEventListener("focus", refresh);
     };
-  }, [data?.user?.id]);
+  }, [
+    data?.user?.id,
+    page,
+    pageNumber,
+    historyPage,
+    search,
+    status,
+    follow,
+    detail,
+  ]);
   useEffect(() => {
     setSelected([]);
     setNotice("");
@@ -108,6 +186,16 @@ export default function Workspace({ page, studentId = null }) {
     setStatus("");
     setFollow("");
   }, [page]);
+  useEffect(() => {
+    setPageNumber(1);
+    setSelected([]);
+  }, [page, search, status, follow]);
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [detail]);
+  useEffect(() => {
+    setSelected([]);
+  }, [pageNumber]);
   async function action(payload) {
     setBusy(true);
     setError("");
@@ -209,25 +297,8 @@ export default function Workspace({ page, studentId = null }) {
   const manager = data.user.role === "manager",
     active = data.users.filter((u) => u.role === "telecaller" && !u.deleted_at),
     pending = data.followups.filter((f) => !f.completed_at),
-    overdue = pending.filter((f) => new Date(f.due_at) < new Date()),
-    student = data.students.find((s) => s.id === detail);
-  const visible = data.students.filter(
-    (s) =>
-      (page !== "Unassigned pool" || !s.owner_id) &&
-      (!status || s.status === status) &&
-      `${s.name} ${s.phone} ${s.client} ${s.course}`
-        .toLowerCase()
-        .includes(search.toLowerCase()) &&
-      (!follow ||
-        pending.some(
-          (f) =>
-            f.student_id === s.id &&
-            (follow === "overdue"
-              ? new Date(f.due_at) < new Date()
-              : new Date(f.due_at).toLocaleDateString() ===
-                new Date().toLocaleDateString()),
-        )),
-  );
+    student = data.student;
+  const visible = data.students;
   const heading =
     page === "Students"
       ? manager
@@ -257,8 +328,9 @@ export default function Workspace({ page, studentId = null }) {
               >
                 <span aria-hidden="true">{p.icon}</span>
                 {p.label}
-                {p.label === "Duplicate review" &&
-                  data.duplicates.length > 0 && <b>{data.duplicates.length}</b>}
+                {p.label === "Duplicate review" && data.duplicateTotal > 0 && (
+                  <b>{data.duplicateTotal}</b>
+                )}
               </Link>
             ))}
         </nav>
@@ -340,38 +412,39 @@ export default function Workspace({ page, studentId = null }) {
               ✓ {notice}
             </p>
           )}
-          {["Overview", "Follow-ups"].includes(page) && overdue.length > 0 && (
-            <button className="reminder" onClick={() => setPage("Follow-ups")}>
-              ◷ {overdue.length} overdue follow-up
-              {overdue.length !== 1 ? "s" : ""} need attention{" "}
-              <span>Review follow-ups →</span>
-            </button>
-          )}
+          {["Overview", "Follow-ups"].includes(page) &&
+            data.stats.overdue > 0 && (
+              <button
+                className="reminder"
+                onClick={() => setPage("Follow-ups")}
+              >
+                ◷ {data.stats.overdue} overdue follow-up
+                {data.stats.overdue !== 1 ? "s" : ""} need attention{" "}
+                <span>Review follow-ups →</span>
+              </button>
+            )}
           {page === "Overview" && (
             <>
               <div className="stats">
                 {[
                   [
                     "Students in workspace",
-                    data.students.length,
+                    data.stats.total,
                     "Your connections, in one place",
                   ],
                   [
                     "Interested",
-                    data.students.filter((s) => s.status === "Interested")
-                      .length,
+                    data.stats.interested,
                     "Conversations with potential",
                   ],
                   [
                     "Follow-ups pending",
-                    pending.length,
-                    `${overdue.length} overdue · keep the momentum`,
+                    data.stats.pending,
+                    `${data.stats.overdue} overdue · keep the momentum`,
                   ],
                   [
                     manager ? "Unassigned" : "Call attempts",
-                    manager
-                      ? data.students.filter((s) => !s.owner_id).length
-                      : data.activities.filter((a) => a.kind === "call").length,
+                    manager ? data.stats.unassigned : data.stats.calls,
                     manager
                       ? "Ready for a new conversation"
                       : "Recorded on your current students",
@@ -396,16 +469,14 @@ export default function Workspace({ page, studentId = null }) {
                 </div>
                 <div className="status-summary">
                   {statuses.map((item, index) => {
-                    const count = data.students.filter(
-                      (s) => s.status === item,
-                    ).length;
+                    const count = data.stats.statuses[item] || 0;
                     return (
                       <div className="status-summary-row" key={item}>
                         <span className={`badge s${index}`}>{item}</span>
                         <div className="status-track">
                           <div
                             style={{
-                              width: `${data.students.length ? (count / data.students.length) * 100 : 0}%`,
+                              width: `${data.stats.total ? (count / data.stats.total) * 100 : 0}%`,
                             }}
                           />
                         </div>
@@ -422,7 +493,7 @@ export default function Workspace({ page, studentId = null }) {
               <div className="panel-heading">
                 <h2>
                   {page === "Students" ? "All students" : "Unassigned students"}{" "}
-                  <span className="count">{visible.length}</span>
+                  <span className="count">{data.pagination.total}</span>
                 </h2>
                 <small className="muted">
                   Ownership stays until reassigned
@@ -591,11 +662,7 @@ export default function Workspace({ page, studentId = null }) {
                   <div className="empty">
                     <span>◎</span>
                     <h3>A fresh start for good conversations</h3>
-                    <p>
-                      {data.students.length
-                        ? "No students match these filters."
-                        : "Import your first student list to get started."}
-                    </p>
+                    <p>No students match these filters.</p>
                     {manager && (
                       <button onClick={() => setPage("Import students")}>
                         Import student list →
@@ -605,16 +672,17 @@ export default function Workspace({ page, studentId = null }) {
                 )}
               </div>
               <footer>
-                {visible.length} students{" "}
+                {data.pagination.total} students{" "}
                 <span>Every conversation counts.</span>
               </footer>
+              <Pagination value={data.pagination} onChange={setPageNumber} />
             </section>
           )}
           {page === "Follow-ups" && (
             <section className="panel">
               <div className="panel-heading">
                 <h2>Upcoming & overdue</h2>
-                <span className="count">{pending.length}</span>
+                <span className="count">{data.pagination.total}</span>
               </div>
               {!pending.length && (
                 <div className="empty">
@@ -636,15 +704,13 @@ export default function Workspace({ page, studentId = null }) {
                         className="text-button"
                         onClick={() => setDetail(f.student_id)}
                       >
-                        {data.students.find((s) => s.id === f.student_id)?.name}
+                        {f.student_name}
                       </button>
                     </h3>
                     <p>{f.note}</p>
                     <small>
                       Responsible:{" "}
-                      {data.students.find((s) => s.id === f.student_id)
-                        ?.owner_name ||
-                        "Unassigned — manager allocation needed"}
+                      {f.owner_name || "Unassigned — manager allocation needed"}
                     </small>
                   </div>
                   <button
@@ -674,7 +740,7 @@ export default function Workspace({ page, studentId = null }) {
                         <small>
                           {u.deleted_at
                             ? "Deactivated"
-                            : `${data.students.filter((s) => s.owner_id === u.id).length} assigned students`}
+                            : `${u.assigned_count} assigned students`}
                         </small>
                       </div>
                       <button
@@ -741,7 +807,7 @@ export default function Workspace({ page, studentId = null }) {
             </div>
           )}
           {page === "Import students" && manager && (
-            <ImportStudents onChanged={load} />
+            <ImportStudents onChanged={() => load()} />
           )}
           {page === "Duplicate review" && manager && (
             <section className="panel padded">
@@ -820,6 +886,9 @@ export default function Workspace({ page, studentId = null }) {
                 </div>
               ))}
             </section>
+          )}
+          {["Follow-ups", "Team", "Duplicate review"].includes(page) && (
+            <Pagination value={data.pagination} onChange={setPageNumber} />
           )}
           <p className="workspace-footer">
             EXTOPR CALLDESK <span>Built for meaningful connections.</span>
@@ -957,6 +1026,10 @@ export default function Workspace({ page, studentId = null }) {
                   </article>
                 ))}
             </div>
+            <Pagination
+              value={data.historyPagination}
+              onChange={setHistoryPage}
+            />
           </section>
         </div>
       )}

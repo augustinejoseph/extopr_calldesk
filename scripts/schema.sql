@@ -154,3 +154,44 @@ CREATE INDEX IF NOT EXISTS duplicate_reviews_source ON duplicate_reviews (source
 CREATE INDEX IF NOT EXISTS activities_student ON activities (student_id);
 
 CREATE INDEX IF NOT EXISTS activities_import ON activities (import_batch_id);
+
+-- Imported profile details are optional; workflow fields keep their defaults.
+ALTER TABLE students
+ALTER COLUMN district
+DROP NOT NULL,
+ALTER COLUMN sub_district
+DROP NOT NULL,
+ALTER COLUMN father_name
+DROP NOT NULL,
+ALTER COLUMN gender
+DROP NOT NULL,
+ALTER COLUMN community
+DROP NOT NULL,
+ALTER COLUMN student_group
+DROP NOT NULL,
+ALTER COLUMN address
+DROP NOT NULL,
+ALTER COLUMN pincode
+DROP NOT NULL,
+ALTER COLUMN school_name
+DROP NOT NULL;
+
+CREATE INDEX IF NOT EXISTS students_created_page ON students (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS students_owner_page ON students (owner_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS activities_history_page ON activities (student_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS followups_pending_due ON followups (due_at, id)
+WHERE
+  completed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS followups_pending_student ON followups (student_id, due_at, id)
+WHERE
+  completed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS duplicates_pending_page ON duplicate_reviews (id)
+WHERE
+  resolved_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS imports_created_page ON import_batches (created_at DESC, id DESC);

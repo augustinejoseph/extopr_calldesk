@@ -94,6 +94,37 @@ test(
       assert.equal(result.review_count, 2);
       assert.equal(result.errors.length, 1);
       assert.equal(result.errors[0].row, 5);
+      await sql`insert into import_chunks(batch_id,chunk_index,row_count,imported,review_count,errors) values(${batch.id},1,0,0,0,${sql.json(
+        [
+          { row: 6, error: "Missing name" },
+          { row: 7, error: "Invalid phone" },
+        ],
+      )})`;
+      const reportResponse = await imports.GET(
+        new Request(
+          `http://localhost/api/imports?id=${batch.id}&limit=2&page=1`,
+        ),
+      );
+      const reportFirst = await reportResponse.json();
+      assert.equal(reportResponse.status, 200);
+      assert.equal(reportFirst.pagination.total, 3);
+      assert.deepEqual(
+        reportFirst.errors.map((e) => e.row),
+        [5, 6],
+      );
+      assert.equal(reportFirst.hasMore, true);
+      const reportSecond = await (
+        await imports.GET(
+          new Request(
+            `http://localhost/api/imports?id=${batch.id}&limit=2&page=2`,
+          ),
+        )
+      ).json();
+      assert.deepEqual(reportSecond.errors, [
+        { row: 7, error: "Invalid phone" },
+      ]);
+      assert.equal(reportSecond.hasMore, false);
+      await sql`delete from import_chunks where batch_id=${batch.id} and chunk_index=1`;
       const retried = await post(imports, chunk);
       assert.deepEqual(retried, result);
       const [created] =
@@ -208,6 +239,84 @@ test(
         confirm: second.filename,
       });
       assert.equal((await sql`select * from students`).length, 1);
+      // Pagination must run in SQL without changing totals or ownership scope.
+      const fixtures = await sql`insert into students(name,phone,status)
+        select 'Paged ' || n,'91880000' || lpad(n::text,4,'0'),'Interested'
+        from generate_series(1,105) n returning id`;
+      const get = async (api, query) => {
+        const response = await api.GET(
+          new Request(`http://localhost/api/workspace?${query}`),
+        );
+        assert.equal(response.status, 200);
+        return response.json();
+      };
+      const firstPage = await get(workspace, "view=Students&limit=50");
+      const secondPage = await get(workspace, "view=Students&limit=50&page=2");
+      assert.equal(firstPage.pagination.total, 106);
+      assert.equal(firstPage.students.length, 50);
+      assert.equal(secondPage.students.length, 50);
+      assert.ok(
+        !firstPage.students.some((s) =>
+          secondPage.students.some((t) => t.id === s.id),
+        ),
+      );
+      const filtered = await get(
+        workspace,
+        "view=Students&search=Paged&status=Interested&page=3",
+      );
+      assert.equal(filtered.pagination.total, 105);
+      assert.equal(filtered.students.length, 5);
+      const overview = await get(workspace, "view=Overview");
+      assert.equal(overview.stats.total, 106);
+      assert.equal(overview.stats.interested, 105);
+      const target = fixtures[0].id;
+      await sql`insert into activities(student_id,author_id,kind) select ${target},${manager.id},'call' from generate_series(1,3)`;
+      const history = await get(
+        workspace,
+        `view=Students&student=${target}&limit=2&historyPage=2`,
+      );
+      assert.equal(history.student.id, target);
+      assert.equal(history.historyPagination.total, 3);
+      assert.equal(history.activities.length, 1);
+      await sql`insert into followups(student_id,author_id,due_at,note) select ${target},${manager.id},now()-interval '1 hour','Due' from generate_series(1,3)`;
+      const followups = await get(workspace, "view=Follow-ups&limit=2&page=2");
+      assert.equal(followups.pagination.total, 3);
+      assert.equal(followups.followups.length, 1);
+      assert.ok(followups.followups[0].student_name);
+      const overdue = await get(workspace, "view=Students&follow=overdue");
+      assert.equal(overdue.pagination.total, 1);
+      const today = await get(
+        workspace,
+        `view=Students&follow=today&dayStart=${encodeURIComponent(new Date(Date.now() - 86400000).toISOString())}&dayEnd=${encodeURIComponent(new Date(Date.now() + 86400000).toISOString())}`,
+      );
+      assert.equal(today.pagination.total, 1);
+      for (const view of ["Unassigned pool", "Team", "Duplicate review"]) {
+        await get(workspace, `view=${encodeURIComponent(view)}&limit=1`);
+      }
+      const noClient = await post(imports, {
+        action: "start",
+        filename: "optional.csv",
+        total: 1,
+      });
+      assert.equal(noClient.batch.client, "");
+      const importsPage = await get(imports, "limit=1");
+      assert.equal(importsPage.batches.length, 1);
+      const report = await get(imports, `id=${noClient.batch.id}&limit=1`);
+      assert.deepEqual(report.errors, []);
+      globalThis.importTestActor = { ...manager, role: "telecaller" };
+      const scoped = await get(workspace, `view=Students&student=${target}`);
+      assert.equal(scoped.pagination.total, 0);
+      assert.equal(scoped.student, null);
+      assert.equal(scoped.activities.length, 0);
+      globalThis.importTestActor = manager;
+      await post(imports, {
+        action: "delete",
+        id: noClient.batch.id,
+        confirm: "optional.csv",
+      });
+      await sql`delete from activities where student_id in ${sql(fixtures.map((s) => s.id))}`;
+      await sql`delete from followups where student_id in ${sql(fixtures.map((s) => s.id))}`;
+      await sql`delete from students where id in ${sql(fixtures.map((s) => s.id))}`;
       if (process.env.IMPORT_TEST_FILE) {
         const XLSX = await import("xlsx");
         const book = XLSX.read(await readFile(process.env.IMPORT_TEST_FILE), {

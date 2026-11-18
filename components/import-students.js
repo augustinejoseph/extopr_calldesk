@@ -19,20 +19,33 @@ export default function ImportStudents({ onChanged }) {
     [filename, setFilename] = useState(""),
     [client, setClient] = useState(""),
     [batches, setBatches] = useState([]),
+    [page, setPage] = useState(1),
+    [pagination, setPagination] = useState(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [progress, setProgress] = useState(null),
     [session, setSession] = useState(null),
-    [errors, setErrors] = useState([]);
+    [errors, setErrors] = useState([]),
+    [reportBatch, setReportBatch] = useState(null),
+    [reportPage, setReportPage] = useState(1),
+    [report, setReport] = useState(null),
+    [reportLoading, setReportLoading] = useState(false),
+    [reportError, setReportError] = useState("");
   async function refresh() {
-    const r = await fetch("/api/imports");
+    const r = await fetch(`/api/imports?page=${page}`);
     const data = await r.json();
     if (!r.ok) throw Error(data.error);
     setBatches(data.batches);
+    setPagination(data.pagination);
+    const last = Math.max(
+      1,
+      Math.ceil(data.pagination.total / data.pagination.limit),
+    );
+    if (page > last) setPage(last);
   }
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
-  }, []);
+  }, [page]);
   async function readFile(file) {
     if (!file) return;
     setRows([]);
@@ -174,24 +187,29 @@ export default function ImportStudents({ onChanged }) {
       setBusy(false);
     }
   }
-  async function downloadErrors(batch) {
-    try {
-      const r = await fetch(`/api/imports?id=${encodeURIComponent(batch.id)}`);
-      const data = await r.json();
-      if (!r.ok) throw Error(data.error);
-      const blob = new Blob([JSON.stringify(data.errors, null, 2)], {
-        type: "application/json",
+  useEffect(() => {
+    if (!reportBatch) return;
+    const controller = new AbortController();
+    setReportLoading(true);
+    setReportError("");
+    setReport(null);
+    fetch(
+      `/api/imports?id=${encodeURIComponent(reportBatch.id)}&page=${reportPage}`,
+      { signal: controller.signal },
+    )
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw Error(data.error);
+        if (!controller.signal.aborted) setReport(data);
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) setReportError(e.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReportLoading(false);
       });
-      const url = URL.createObjectURL(blob),
-        link = document.createElement("a");
-      link.href = url;
-      link.download = `${batch.filename}-errors.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
+    return () => controller.abort();
+  }, [reportBatch, reportPage]);
   async function remove(batch) {
     const confirm = window.prompt(
       `Permanently delete ${batch.filename}? This deletes students created by this import, including their call history and follow-ups. Existing students are preserved. Other imports’ incoming records are preserved for review. Type the filename to confirm.`,
@@ -201,6 +219,7 @@ export default function ImportStudents({ onChanged }) {
     setError("");
     try {
       await send({ action: "delete", id: batch.id, confirm });
+      if (reportBatch?.id === batch.id) setReportBatch(null);
       if (session?.id === batch.id) {
         setSession(null);
         setRows([]);
@@ -238,9 +257,8 @@ export default function ImportStudents({ onChanged }) {
           </h3>
           <fieldset disabled={busy || !!session}>
             <label>
-              Client / source name
+              Client / source name (optional)
               <input
-                required
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
               />
@@ -335,7 +353,7 @@ export default function ImportStudents({ onChanged }) {
             </p>
           ))}
           {errors.length > 100 && (
-            <p>Download the complete report from import history.</p>
+            <p>View the complete report in import history.</p>
           )}
         </details>
       )}
@@ -379,8 +397,15 @@ export default function ImportStudents({ onChanged }) {
                 <td>{b.failed}</td>
                 <td>
                   {b.failed > 0 && (
-                    <button type="button" onClick={() => downloadErrors(b)}>
-                      Error report
+                    <button
+                      type="button"
+                      aria-controls="import-error-report"
+                      onClick={() => {
+                        setReportBatch(b);
+                        setReportPage(1);
+                      }}
+                    >
+                      View errors
                     </button>
                   )}
                   {b.status !== "legacy" && (
@@ -408,6 +433,108 @@ export default function ImportStudents({ onChanged }) {
           </tbody>
         </table>
       </div>
+      {reportBatch && (
+        <section
+          id="import-error-report"
+          aria-labelledby="import-error-heading"
+          aria-busy={reportLoading}
+        >
+          <div className="panel-heading">
+            <h3 id="import-error-heading">
+              Error report · {reportBatch.filename}
+            </h3>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setReportBatch(null)}
+            >
+              Close report
+            </button>
+          </div>
+          {reportLoading && <p role="status">Loading errors…</p>}
+          {reportError && (
+            <p role="alert" className="error">
+              {reportError}
+            </p>
+          )}
+          {report && (
+            <>
+              <p>
+                {report.pagination.total} failed rows. Correct these rows in
+                your spreadsheet before importing them again.
+              </p>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Worksheet row</th>
+                      <th scope="col">Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.errors.map((item, index) => (
+                      <tr key={`${item.row}-${index}`}>
+                        <td>{item.row}</td>
+                        <td>{item.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {!report.errors.length && <p>No errors to display.</p>}
+              {report.pagination.total > report.pagination.limit && (
+                <div
+                  className="pagination"
+                  aria-label="Error report pagination"
+                >
+                  <button
+                    type="button"
+                    disabled={reportPage <= 1}
+                    onClick={() => setReportPage(reportPage - 1)}
+                  >
+                    Previous errors
+                  </button>
+                  <span>
+                    Page {reportPage} of{" "}
+                    {Math.ceil(
+                      report.pagination.total / report.pagination.limit,
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!report.hasMore}
+                    onClick={() => setReportPage(reportPage + 1)}
+                  >
+                    Next errors
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
+      {pagination && pagination.total > pagination.limit && (
+        <div className="pagination" aria-label="Import history pagination">
+          <button
+            type="button"
+            disabled={busy || page <= 1}
+            onClick={() => setPage(page - 1)}
+          >
+            Previous
+          </button>
+          <span>
+            Page {page} of {Math.ceil(pagination.total / pagination.limit)} ·{" "}
+            {pagination.total} imports
+          </span>
+          <button
+            type="button"
+            disabled={busy || page * pagination.limit >= pagination.total}
+            onClick={() => setPage(page + 1)}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </section>
   );
 }

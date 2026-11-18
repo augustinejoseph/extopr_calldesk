@@ -60,3 +60,16 @@ test("invalid rows are rejected independently", () => {
     [3, 4, 5],
   );
 });
+
+test("only name and phone are required for student profiles", () => {
+  const row = prepareRow({ name: " Student ", phone: "9486832536" });
+  assert.equal(row.name, "Student");
+  assert.equal(row.client, "");
+  for (const key of Object.keys(importFields).filter(
+    (k) => !["name", "phone"].includes(k),
+  )) {
+    assert.equal(row[key], "");
+  }
+  assert.throws(() => prepareRow({ phone: "9486832536" }), /name is required/);
+  assert.throws(() => prepareRow({ name: "Student" }), /Phone/);
+});

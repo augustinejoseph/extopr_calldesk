@@ -1,3 +1,4 @@
+import { pagination } from "../../../lib/pagination.mjs";
 import { randomUUID } from "node:crypto";
 import { db } from "../../../lib/db.mjs";
 import { currentUser, sameOrigin } from "../../../lib/auth.mjs";
@@ -7,19 +8,34 @@ export async function GET(request) {
   if (user?.role !== "manager")
     return Response.json({ error: "Manager access required" }, { status: 403 });
   const sql = db();
-  const id = new URL(request.url).searchParams.get("id");
+  const params = new URL(request.url).searchParams;
+  const { page, limit, offset } = pagination(params);
+  const id = params.get("id");
   if (id) {
-    const chunks =
-      await sql`select chunk_index,errors from import_chunks where batch_id=${id} order by chunk_index`;
+    if (!/^[0-9a-f-]{36}$/i.test(id))
+      return Response.json({ error: "Invalid import" }, { status: 400 });
+    const [count] =
+      await sql`select coalesce(sum(jsonb_array_length(errors)),0)::int as total from import_chunks where batch_id=${id}`;
+    const errors = await sql`select e.value as error from import_chunks c
+      cross join lateral jsonb_array_elements(c.errors) with ordinality e(value,position)
+      where c.batch_id=${id} order by c.chunk_index,e.position limit ${limit} offset ${offset}`;
     return Response.json(
-      { errors: chunks.flatMap((c) => c.errors) },
+      {
+        errors: errors.map((e) => e.error),
+        hasMore: offset + limit < count.total,
+        pagination: { page, limit, total: count.total },
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
-  const batches =
-    await sql`select b.*,u.name as author_name,coalesce(sum(c.imported),0)::int as imported,coalesce(sum(c.review_count),0)::int as review_count,coalesce(sum(jsonb_array_length(c.errors)),0)::int as failed,coalesce(sum(c.row_count),0)::int as processed from import_batches b left join users u on u.id=b.author_id left join import_chunks c on c.batch_id=b.id group by b.id,u.name order by b.created_at desc`;
+  const [count] = await sql`select count(*)::int as total from import_batches`;
+  const batches = await sql`select b.*,u.name as author_name,c.* from
+    (select * from import_batches order by created_at desc,id desc limit ${limit} offset ${offset}) b
+    left join users u on u.id=b.author_id
+    left join lateral (select coalesce(sum(imported),0)::int as imported,coalesce(sum(review_count),0)::int as review_count,coalesce(sum(jsonb_array_length(errors)),0)::int as failed,coalesce(sum(row_count),0)::int as processed from import_chunks where batch_id=b.id) c on true
+    order by b.created_at desc,b.id desc`;
   return Response.json(
-    { batches },
+    { batches, pagination: { page, limit, total: count.total } },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -43,15 +59,14 @@ export async function POST(request) {
       await tx`select pg_advisory_xact_lock(823407)`;
       if (input.action === "start") {
         if (
-          typeof input.client !== "string" ||
-          !input.client.trim() ||
+          (input.client != null && typeof input.client !== "string") ||
           !Number.isInteger(input.total) ||
           input.total < 1 ||
           input.total > 100000
         )
-          throw Error("Provide a client and 1–100,000 rows");
+          throw Error("Provide 1–100,000 rows");
         const [batch] =
-          await tx`insert into import_batches(filename,client,author_id,mapping,total_rows,status) values(${String(input.filename || "upload").slice(0, 255)},${input.client.trim()},${user.id},${tx.json(input.mapping || {})},${input.total},'uploading') returning *`;
+          await tx`insert into import_batches(filename,client,author_id,mapping,total_rows,status) values(${String(input.filename || "upload").slice(0, 255)},${(input.client || "").trim()},${user.id},${tx.json(input.mapping || {})},${input.total},'uploading') returning *`;
         return { batch };
       }
       const [batch] =
