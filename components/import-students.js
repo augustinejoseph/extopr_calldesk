@@ -13,7 +13,7 @@ async function send(input) {
   if (!response.ok) throw Error(result.error || "Import failed");
   return result;
 }
-export default function ImportStudents({ onChanged }) {
+export default function ImportStudents() {
   const [rows, setRows] = useState([]),
     [columns, setColumns] = useState([]),
     [mapping, setMapping] = useState({}),
@@ -178,7 +178,6 @@ export default function ImportStudents({ onChanged }) {
       setRows([]);
       setSession(null);
       await refresh();
-      await onChanged();
     } catch (e) {
       setError(
         `${e.message}. Saved chunks are preserved; retry to continue, or delete the import.`,
@@ -226,7 +225,6 @@ export default function ImportStudents({ onChanged }) {
         setRows([]);
       }
       await refresh();
-      await onChanged();
     } catch (e) {
       setError(e.message);
     } finally {

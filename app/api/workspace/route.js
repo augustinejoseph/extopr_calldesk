@@ -10,7 +10,7 @@ export async function GET(request) {
   const sql = db();
   const params = new URL(request.url).searchParams;
   const { page, limit, offset } = pagination(params);
-  const view = params.get("view") || "Students";
+  const view = params.get("view");
   const detail = params.get("student");
   if (
     detail &&
@@ -46,6 +46,25 @@ export async function GET(request) {
       { headers: { "Cache-Control": "no-store" } },
     );
   }
+  if (
+    ![
+      "Students",
+      "Unassigned pool",
+      "Overview",
+      "Follow-ups",
+      "Team",
+      "Duplicate review",
+    ].includes(view)
+  )
+    return Response.json(
+      { error: "Choose a valid workspace view" },
+      { status: 400 },
+    );
+  if (
+    ["Unassigned pool", "Team", "Duplicate review"].includes(view) &&
+    user.role !== "manager"
+  )
+    return Response.json({ error: "Manager access required" }, { status: 403 });
   const search = params.get("search") || "";
   const status = params.get("status") || "";
   const follow = params.get("follow") || "";

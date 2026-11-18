@@ -9,5 +9,5 @@ export default async function StudentPage({ params }) {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
   )
     notFound();
-  return <Workspace page="Students" studentId={id} />;
+  return <Workspace page="Students" studentId={id} initialUser={user} />;
 }

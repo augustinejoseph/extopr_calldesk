@@ -105,3 +105,59 @@ test("invalid student and signed-out requests avoid database reads", async () =>
   );
   assert.equal(queries.length, 0);
 });
+test("missing and invalid views never fall back to loading students", async () => {
+  const queries = fixture();
+  for (const suffix of [
+    "",
+    "?view=Login",
+    "?view=Import%20students",
+    "?view=invalid",
+  ]) {
+    assert.equal(
+      (await GET(new Request("https://example.test/api/workspace" + suffix)))
+        .status,
+      400,
+    );
+  }
+  assert.equal(queries.length, 0);
+});
+test("non-list views do not fetch student records", async () => {
+  for (const view of ["Overview", "Follow-ups", "Team", "Duplicate review"]) {
+    const queries = fixture();
+    globalThis.workspaceFixture.user.role = "manager";
+    const response = await GET(
+      new Request(
+        "https://example.test/api/workspace?view=" + encodeURIComponent(view),
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).students, []);
+    assert.ok(queries.every((q) => !q.includes("select s.id,s.name,s.phone")));
+  }
+});
+test("manager-only views reject callers before querying their data", async () => {
+  for (const view of ["Unassigned pool", "Team", "Duplicate review"]) {
+    const queries = fixture();
+    const response = await GET(
+      new Request(
+        "https://example.test/api/workspace?view=" + encodeURIComponent(view),
+      ),
+    );
+    assert.equal(response.status, 403);
+    assert.equal(queries.length, 0);
+  }
+});
+test("only explicit student list views load student records", async () => {
+  for (const view of ["Students", "Unassigned pool"]) {
+    const queries = fixture();
+    globalThis.workspaceFixture.user.role = "manager";
+    const response = await GET(
+      new Request(
+        "https://example.test/api/workspace?view=" + encodeURIComponent(view),
+      ),
+    );
+    assert.equal(response.status, 200);
+    assert.ok(queries.some((q) => q.includes("select s.id,s.name,s.phone")));
+    assert.ok(queries.every((q) => !q.includes("duplicate_reviews")));
+  }
+});

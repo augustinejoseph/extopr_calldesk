@@ -4,6 +4,7 @@ import WorkspaceShimmer, { LayoutShimmer } from "./shimmer";
 import { statuses } from "../lib/policy.mjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { workspaceQuery } from "../lib/workspace-request.mjs";
 import { workspacePages } from "../lib/navigation.mjs";
 import Dropdown from "./dropdown";
 import ImportStudents from "./import-students";
@@ -46,11 +47,40 @@ const date = (d) =>
     dateStyle: "medium",
     timeStyle: "short",
   });
-export default function Workspace({ page, studentId = null }) {
+const emptyWorkspace = (user) => ({
+  user,
+  students: [],
+  users: [],
+  followups: [],
+  activities: [],
+  duplicates: [],
+  stats: {
+    total: 0,
+    interested: 0,
+    unassigned: 0,
+    pending: 0,
+    overdue: 0,
+    calls: 0,
+    statuses: {},
+  },
+  pagination: { page: 1, limit: 50, total: 0 },
+});
+export default function Workspace({
+  page,
+  studentId = null,
+  initialUser = null,
+}) {
   const router = useRouter();
   const loadVersion = useRef(0);
-  const [data, setData] = useState(null),
-    [ready, setReady] = useState(false),
+  const lastLoaded = useRef(0);
+  const listDirty = useRef(false);
+  const loadedProfile = useRef(null);
+  const [data, setData] = useState(
+      initialUser && !workspaceQuery(page, { studentId })
+        ? emptyWorkspace(initialUser)
+        : null,
+    ),
+    [ready, setReady] = useState(!workspaceQuery(page, { studentId })),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [pageNumber, setPageNumber] = useState(1),
@@ -89,6 +119,13 @@ export default function Workspace({ page, studentId = null }) {
   }, []);
   useEffect(() => {
     if (!detail || (!more && basicStudent?.id === detail)) return;
+    const key = `${detail}:${historyPage}:${profileVersion}`;
+    if (
+      more &&
+      profile?.student?.id === detail &&
+      loadedProfile.current === key
+    )
+      return;
     const controller = new AbortController();
     setProfile(null);
     setProfileError("");
@@ -100,8 +137,10 @@ export default function Workspace({ page, studentId = null }) {
         const d = await r.json();
         if (!r.ok) throw Error(d.error);
         if (!controller.signal.aborted) {
-          if (more) setProfile(d);
-          else setBasicStudent(d.student);
+          if (more) {
+            setProfile(d);
+            loadedProfile.current = key;
+          } else setBasicStudent(d.student);
           if (!d.student) setProfileError("Student not found or access denied");
         }
       })
@@ -180,21 +219,19 @@ export default function Workspace({ page, studentId = null }) {
     };
   }, [detail, ready]);
   async function load(signal) {
-    const version = ++loadVersion.current;
-    setReady(false);
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(dayStart);
-    dayEnd.setDate(dayEnd.getDate() + 1);
-    const query = new URLSearchParams({
-      view: page,
-      page: pageNumber,
+    const query = workspaceQuery(page, {
+      pageNumber,
       search,
       status,
       follow,
-      dayStart: dayStart.toISOString(),
-      dayEnd: dayEnd.toISOString(),
+      studentId: studentId && detail,
     });
+    if (!query) {
+      setReady(true);
+      return;
+    }
+    const version = ++loadVersion.current;
+    setReady(false);
 
     try {
       const r = await fetch(`/api/workspace?${query}`, { signal });
@@ -207,6 +244,7 @@ export default function Workspace({ page, studentId = null }) {
         );
         if (pageNumber > last) setPageNumber(last);
         setData(d);
+        lastLoaded.current = Date.now();
       } else if (r.status === 401) {
         setData(null);
         if (page !== "Login") router.replace("/login");
@@ -233,17 +271,21 @@ export default function Workspace({ page, studentId = null }) {
       controller.abort();
       loadVersion.current++;
     };
-  }, [page, pageNumber, search, status, follow]);
+  }, [page, pageNumber, search, status, follow, !!(studentId && detail)]);
   useEffect(() => {
-    if (!data?.user?.id) return;
-    const refresh = () => load().catch(() => {});
-    const timer = setInterval(refresh, 60000);
+    if (!data?.user?.id || detail || !workspaceQuery(page)) return;
+    const refresh = () => {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastLoaded.current >= 60000
+      )
+        load().catch(() => {});
+    };
     window.addEventListener("focus", refresh);
     return () => {
-      clearInterval(timer);
       window.removeEventListener("focus", refresh);
     };
-  }, [data?.user?.id, page, pageNumber, search, status, follow]);
+  }, [data?.user?.id, page, pageNumber, search, status, follow, detail]);
   useEffect(() => {
     setSelected([]);
     setNotice("");
@@ -255,7 +297,13 @@ export default function Workspace({ page, studentId = null }) {
   useEffect(() => {
     setPageNumber(1);
     setSelected([]);
-  }, [page, search, status, follow]);
+  }, [page]);
+  useEffect(() => {
+    if (!detail && listDirty.current && !studentId) {
+      listDirty.current = false;
+      load().catch(() => setError("Unable to refresh students"));
+    }
+  }, [detail]);
   useEffect(() => {
     setHistoryPage(1);
   }, [detail]);
@@ -273,8 +321,17 @@ export default function Workspace({ page, studentId = null }) {
       });
       const result = await r.json();
       if (!r.ok) throw Error(result.error);
-      await load();
+      if (payload.action !== "outcome") await load();
       if (payload.action === "outcome") {
+        listDirty.current = true;
+        setData((d) => ({
+          ...d,
+          students: d.students.map((s) =>
+            s.id === payload.id
+              ? { ...s, status: payload.status, notes: payload.note }
+              : s,
+          ),
+        }));
         setBasicStudent(
           (s) => s && { ...s, status: payload.status, notes: payload.note },
         );
@@ -596,12 +653,18 @@ export default function Workspace({ page, studentId = null }) {
                   aria-label="Search students"
                   placeholder="⌕  Search name, phone, client…"
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={(e) => {
+                    setPageNumber(1);
+                    setSearch(e.target.value);
+                  }}
                 />
                 <Dropdown
                   aria-label="Call status"
                   value={status}
-                  onChange={setStatus}
+                  onChange={(value) => {
+                    setPageNumber(1);
+                    setStatus(value);
+                  }}
                   options={[
                     { value: "", label: "All call statuses" },
                     ...statuses.map((s) => ({ value: s, label: s })),
@@ -610,7 +673,10 @@ export default function Workspace({ page, studentId = null }) {
                 <Dropdown
                   aria-label="Follow-up date"
                   value={follow}
-                  onChange={setFollow}
+                  onChange={(value) => {
+                    setPageNumber(1);
+                    setFollow(value);
+                  }}
                   options={[
                     { value: "", label: "All follow-up dates" },
                     { value: "today", label: "Due today" },
@@ -890,9 +956,7 @@ export default function Workspace({ page, studentId = null }) {
               </form>
             </div>
           )}
-          {page === "Import students" && manager && (
-            <ImportStudents onChanged={() => load()} />
-          )}
+          {page === "Import students" && manager && <ImportStudents />}
           {page === "Duplicate review" && manager && (
             <section className="panel padded">
               <h2>Keep the context. Resolve the overlap.</h2>
