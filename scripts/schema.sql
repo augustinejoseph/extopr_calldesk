@@ -195,3 +195,7 @@ WHERE
   resolved_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS imports_created_page ON import_batches (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS students_status_page ON students (status, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS students_owner_status_page ON students (owner_id, status, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS activities_latest_call ON activities (student_id, created_at DESC, id DESC) WHERE kind = 'call';

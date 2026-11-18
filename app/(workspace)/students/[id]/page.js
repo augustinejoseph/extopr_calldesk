@@ -1,6 +1,5 @@
 import { notFound, redirect } from "next/navigation";
 import { currentUser } from "../../../../lib/auth.mjs";
-import { db } from "../../../../lib/db.mjs";
 import Workspace from "../../../../components/workspace";
 export default async function StudentPage({ params }) {
   const user = await currentUser();
@@ -10,8 +9,5 @@ export default async function StudentPage({ params }) {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
   )
     notFound();
-  const [student] =
-    await db()`select id from students where id=${id} and (${user.role === "manager"} or owner_id=${user.id})`;
-  if (!student) notFound();
   return <Workspace page="Students" studentId={id} />;
 }

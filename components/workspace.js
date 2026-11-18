@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import WorkspaceShimmer, { LayoutShimmer } from "./shimmer";
 import { statuses } from "../lib/policy.mjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -48,12 +49,6 @@ const date = (d) =>
 export default function Workspace({ page, studentId = null }) {
   const router = useRouter();
   const loadVersion = useRef(0);
-  const detail = studentId;
-  const setDetail = (id) => router.push(id ? `/students/${id}` : "/students");
-  const setPage = (label) =>
-    router.push(
-      workspacePages.find((p) => p.label === label)?.href || "/students",
-    );
   const [data, setData] = useState(null),
     [ready, setReady] = useState(false),
     [error, setError] = useState(""),
@@ -65,6 +60,88 @@ export default function Workspace({ page, studentId = null }) {
     [follow, setFollow] = useState(""),
     [selected, setSelected] = useState([]),
     [notice, setNotice] = useState("");
+  const [detail, updateDetail] = useState(studentId);
+  const [basicStudent, setBasicStudent] = useState(null);
+  const [more, setMore] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [profileError, setProfileError] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [profileVersion, setProfileVersion] = useState(0);
+  const setDetail = (id) => {
+    setBasicStudent(data?.students.find((s) => s.id === id) || null);
+    setProfileError("");
+    updateDetail(id);
+    setMore(false);
+    setProfile(null);
+    window.history.pushState(null, "", id ? `/students/${id}` : "/students");
+  };
+  useEffect(() => {
+    const back = () => {
+      updateDetail(
+        window.location.pathname.match(/^\/students\/([^/]+)$/)?.[1] || null,
+      );
+      setMore(false);
+      setBasicStudent(null);
+      setProfile(null);
+    };
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, []);
+  useEffect(() => {
+    if (!detail || (!more && basicStudent?.id === detail)) return;
+    const controller = new AbortController();
+    setProfile(null);
+    setProfileError("");
+    fetch(
+      `/api/workspace?student=${detail}&more=${more ? "1" : "0"}&historyPage=${historyPage}`,
+      { signal: controller.signal },
+    )
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw Error(d.error);
+        if (!controller.signal.aborted) {
+          if (more) setProfile(d);
+          else setBasicStudent(d.student);
+          if (!d.student) setProfileError("Student not found or access denied");
+        }
+      })
+      .catch((e) => {
+        if (e.name !== "AbortError") setProfileError(e.message);
+      });
+    return () => controller.abort();
+  }, [detail, more, historyPage, basicStudent?.id, profileVersion]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const previous = document.activeElement;
+    const menu = document.getElementById("workspace-navigation");
+    menu?.querySelector("button")?.focus();
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const keys = (e) => {
+      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key !== "Tab") return;
+      const items = [...menu.querySelectorAll("button,a[href]")];
+      const first = items[0],
+        last = items.at(-1);
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last?.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", keys);
+    return () => {
+      document.removeEventListener("keydown", keys);
+      document.body.style.overflow = overflow;
+      previous?.focus();
+    };
+  }, [menuOpen]);
+  const setPage = (label) =>
+    router.push(
+      workspacePages.find((p) => p.label === label)?.href || "/students",
+    );
   useEffect(() => {
     if (!detail) return;
     const previous = document.activeElement;
@@ -79,7 +156,7 @@ export default function Workspace({ page, studentId = null }) {
       if (e.key === "Tab" && dialog) {
         const items = [
           ...dialog.querySelectorAll(
-            'button:not(:disabled),a[href],input:not(:disabled):not([tabindex="-1"]),textarea:not(:disabled)',
+            'summary,button:not(:disabled),a[href],input:not(:disabled):not([tabindex="-1"]),textarea:not(:disabled)',
           ),
         ];
         const first = items[0],
@@ -104,6 +181,7 @@ export default function Workspace({ page, studentId = null }) {
   }, [detail, ready]);
   async function load(signal) {
     const version = ++loadVersion.current;
+    setReady(false);
     const dayStart = new Date();
     dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(dayStart);
@@ -111,34 +189,31 @@ export default function Workspace({ page, studentId = null }) {
     const query = new URLSearchParams({
       view: page,
       page: pageNumber,
-      historyPage,
       search,
       status,
       follow,
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
     });
-    if (detail) query.set("student", detail);
-    const r = await fetch(`/api/workspace?${query}`, { signal });
-    const d = await r.json();
-    if (version !== loadVersion.current || signal?.aborted) return;
-    if (r.ok) {
-      const last = Math.max(
-        1,
-        Math.ceil(d.pagination.total / d.pagination.limit),
-      );
-      if (pageNumber > last) setPageNumber(last);
-      const lastHistory = Math.max(
-        1,
-        Math.ceil(d.historyPagination.total / d.historyPagination.limit),
-      );
-      if (historyPage > lastHistory) setHistoryPage(lastHistory);
-      setData(d);
-    } else if (r.status === 401) {
-      setData(null);
-      if (page !== "Login") router.replace("/login");
-    } else setError(d.error);
-    setReady(true);
+
+    try {
+      const r = await fetch(`/api/workspace?${query}`, { signal });
+      const d = await r.json();
+      if (version !== loadVersion.current || signal?.aborted) return;
+      if (r.ok) {
+        const last = Math.max(
+          1,
+          Math.ceil(d.pagination.total / d.pagination.limit),
+        );
+        if (pageNumber > last) setPageNumber(last);
+        setData(d);
+      } else if (r.status === 401) {
+        setData(null);
+        if (page !== "Login") router.replace("/login");
+      } else setError(d.error);
+    } finally {
+      if (version === loadVersion.current && !signal?.aborted) setReady(true);
+    }
   }
   useEffect(() => {
     const controller = new AbortController();
@@ -149,7 +224,7 @@ export default function Workspace({ page, studentId = null }) {
           setError("Unable to connect");
           setReady(true);
         }),
-      200,
+      search ? 200 : 0,
     );
     if ("serviceWorker" in navigator)
       navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -158,7 +233,7 @@ export default function Workspace({ page, studentId = null }) {
       controller.abort();
       loadVersion.current++;
     };
-  }, [page, pageNumber, historyPage, search, status, follow, detail]);
+  }, [page, pageNumber, search, status, follow]);
   useEffect(() => {
     if (!data?.user?.id) return;
     const refresh = () => load().catch(() => {});
@@ -168,16 +243,7 @@ export default function Workspace({ page, studentId = null }) {
       clearInterval(timer);
       window.removeEventListener("focus", refresh);
     };
-  }, [
-    data?.user?.id,
-    page,
-    pageNumber,
-    historyPage,
-    search,
-    status,
-    follow,
-    detail,
-  ]);
+  }, [data?.user?.id, page, pageNumber, search, status, follow]);
   useEffect(() => {
     setSelected([]);
     setNotice("");
@@ -208,6 +274,12 @@ export default function Workspace({ page, studentId = null }) {
       const result = await r.json();
       if (!r.ok) throw Error(result.error);
       await load();
+      if (payload.action === "outcome") {
+        setBasicStudent(
+          (s) => s && { ...s, status: payload.status, notes: payload.note },
+        );
+        setProfileVersion((v) => v + 1);
+      }
       setNotice("Changes saved");
       return true;
     } catch (e) {
@@ -238,15 +310,7 @@ export default function Workspace({ page, studentId = null }) {
       setBusy(false);
     }
   }
-  if (!ready)
-    return (
-      <main className="login">
-        <div className="brand">
-          E<span>Extopr / CallDesk</span>
-        </div>
-        <p>Opening your workspace…</p>
-      </main>
-    );
+  if (!data && !ready) return <WorkspaceShimmer page={page} />;
   if (!data)
     return (
       <main className="login">
@@ -297,7 +361,12 @@ export default function Workspace({ page, studentId = null }) {
   const manager = data.user.role === "manager",
     active = data.users.filter((u) => u.role === "telecaller" && !u.deleted_at),
     pending = data.followups.filter((f) => !f.completed_at),
-    student = data.student;
+    student =
+      profile?.student?.id === detail
+        ? profile.student
+        : basicStudent?.id === detail
+          ? basicStudent
+          : null;
   const visible = data.students;
   const heading =
     page === "Students"
@@ -307,7 +376,20 @@ export default function Workspace({ page, studentId = null }) {
       : page;
   return (
     <div className="shell">
-      <aside>
+      {menuOpen && (
+        <button
+          className="menu-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setMenuOpen(false)}
+        />
+      )}
+      <aside id="workspace-navigation" className={menuOpen ? "menu-open" : ""}>
+        <button
+          className="menu-close secondary"
+          onClick={() => setMenuOpen(false)}
+        >
+          Close ×
+        </button>
         <div className="brand">
           E
           <span>
@@ -321,6 +403,7 @@ export default function Workspace({ page, studentId = null }) {
             .map((p) => (
               <Link
                 key={p.href}
+                onClick={() => setMenuOpen(false)}
                 aria-label={p.label}
                 href={p.href}
                 className={page === p.label ? "nav active" : "nav"}
@@ -359,6 +442,15 @@ export default function Workspace({ page, studentId = null }) {
       </aside>
       <div className="main">
         <header>
+          <button
+            className="menu-toggle secondary"
+            aria-label="Open navigation"
+            aria-expanded={menuOpen}
+            aria-controls="workspace-navigation"
+            onClick={() => setMenuOpen(true)}
+          >
+            ☰
+          </button>
           <span>
             Workspace <span className="muted">/ {page}</span>
           </span>
@@ -547,7 +639,10 @@ export default function Workspace({ page, studentId = null }) {
                     aria-label="Assign to"
                     options={[
                       { value: "", label: "Unassigned pool" },
-                      ...active.map((u) => ({ value: u.id, label: u.name })),
+                      ...active.map((u) => ({
+                        value: u.id,
+                        label: u.name,
+                      })),
                     ]}
                   />
                   <button disabled={busy || !selected.length}>
@@ -579,15 +674,21 @@ export default function Workspace({ page, studentId = null }) {
                         </th>
                       )}
                       <th>STUDENT</th>
-                      <th>CLIENT / COURSE</th>
+                      <th>NOTES</th>
                       <th>CALL STATUS</th>
-                      <th>ASSIGNED TO</th>
-                      <th>NEXT FOLLOW-UP</th>
+
                       <th />
                     </tr>
                   </thead>
                   <tbody>
-                    {visible.map((s) => {
+                    {!ready && (
+                      <tr>
+                        <td colSpan={manager ? 5 : 4}>
+                          <LayoutShimmer page={page} />
+                        </td>
+                      </tr>
+                    )}
+                    {(ready ? visible : []).map((s) => {
                       const f = pending.find((f) => f.student_id === s.id);
                       return (
                         <tr key={s.id}>
@@ -619,30 +720,13 @@ export default function Workspace({ page, studentId = null }) {
                               </span>
                             </button>
                           </td>
-                          <td>
-                            {s.client || "—"}
-                            <small>{s.course || "—"}</small>
-                          </td>
+                          <td>{s.notes || "—"}</td>
                           <td>
                             <span
                               className={`badge s${statuses.indexOf(s.status)}`}
                             >
                               {s.status}
                             </span>
-                          </td>
-                          <td>
-                            {s.owner_name || (
-                              <span className="muted">Unassigned</span>
-                            )}
-                          </td>
-                          <td
-                            className={
-                              f && new Date(f.due_at) < new Date()
-                                ? "danger"
-                                : ""
-                            }
-                          >
-                            {f ? date(f.due_at) : "—"}
                           </td>
                           <td>
                             <button
@@ -658,7 +742,7 @@ export default function Workspace({ page, studentId = null }) {
                     })}
                   </tbody>
                 </table>
-                {!visible.length && (
+                {ready && !visible.length && (
                   <div className="empty">
                     <span>◎</span>
                     <h3>A fresh start for good conversations</h3>
@@ -895,7 +979,7 @@ export default function Workspace({ page, studentId = null }) {
           </p>
         </main>
       </div>
-      {student && (
+      {detail && (
         <div className="overlay" onClick={() => setDetail(null)}>
           <section
             className="drawer"
@@ -911,125 +995,153 @@ export default function Workspace({ page, studentId = null }) {
             >
               Close ×
             </button>
-            <p className="eyebrow">STUDENT PROFILE</p>
-            <h1>{student.name}</h1>
-            <p>
-              {student.client} · {student.course}
-            </p>
-            <details>
-              <summary>Imported student details</summary>
-              {Object.entries(importFields)
-                .filter(
-                  ([k]) =>
-                    !["name", "phone", "email", "course"].includes(k) &&
-                    student[k],
-                )
-                .map(([k, label]) => (
-                  <p key={k}>
-                    {label}: {student[k]}
+            {!student ? (
+              <>
+                {profileError ? (
+                  <p role="alert">{profileError}</p>
+                ) : (
+                  <LayoutShimmer detail />
+                )}
+              </>
+            ) : (
+              <>
+                <p className="eyebrow">STUDENT PROFILE</p>
+                <h1>{student.name}</h1>
+
+                <details onToggle={(e) => setMore(e.currentTarget.open)}>
+                  <summary>More · full profile & conversation history</summary>
+                  {profileError && <p role="alert">{profileError}</p>}
+                  {more && !profile && !profileError ? (
+                    <LayoutShimmer detail />
+                  ) : (
+                    <>
+                      {Object.entries(importFields)
+                        .filter(
+                          ([k]) =>
+                            !["name", "phone", "email", "course"].includes(k) &&
+                            student[k],
+                        )
+                        .map(([k, label]) => (
+                          <p key={k}>
+                            {label}: {student[k]}
+                          </p>
+                        ))}
+                      {Object.entries(student.extra_fields || {}).map(
+                        ([k, v]) => (
+                          <p key={k}>
+                            {k}: {String(v)}
+                          </p>
+                        ),
+                      )}
+                      {manager && student.created_by_import_id && (
+                        <p>Import ID: {student.created_by_import_id}</p>
+                      )}
+                    </>
+                  )}
+                </details>
+                {student.notes && <p>{student.notes}</p>}
+                <span className={`badge s${statuses.indexOf(student.status)}`}>
+                  {student.status}
+                </span>
+                <div className="phone-card">
+                  <strong>+{student.phone}</strong>
+                  {student.status === "Do not call" ? (
+                    <b className="danger">DO NOT DIAL</b>
+                  ) : (
+                    <a className="button" href={`tel:+${student.phone}`}>
+                      ☎ Call student
+                    </a>
+                  )}
+                </div>
+                {profile && (
+                  <p className="muted">
+                    Assigned to {student.owner_name || "unassigned pool"} ·{" "}
+                    {student.email || "No email"}
                   </p>
-                ))}
-              {Object.entries(student.extra_fields || {}).map(([k, v]) => (
-                <p key={k}>
-                  {k}: {String(v)}
-                </p>
-              ))}
-              {manager && student.created_by_import_id && (
-                <p>Import ID: {student.created_by_import_id}</p>
-              )}
-            </details>
-            <span className={`badge s${statuses.indexOf(student.status)}`}>
-              {student.status}
-            </span>
-            <div className="phone-card">
-              <strong>+{student.phone}</strong>
-              {student.status === "Do not call" ? (
-                <b className="danger">DO NOT DIAL</b>
-              ) : (
-                <a className="button" href={`tel:+${student.phone}`}>
-                  ☎ Call student
-                </a>
-              )}
-            </div>
-            <p className="muted">
-              Assigned to {student.owner_name || "unassigned pool"} ·{" "}
-              {student.email || "No email"}
-            </p>
-            <form
-              className="outcome-form"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                const form = e.currentTarget;
-                const fields = Object.fromEntries(new FormData(form));
-                if (
-                  await action({
-                    action: "outcome",
-                    id: student.id,
-                    ...fields,
-                    due: fields.due ? new Date(fields.due).toISOString() : null,
-                  })
-                )
-                  form.reset();
-              }}
-            >
-              <h2>Record a conversation</h2>
-              <label>
-                Call outcome
-                <Dropdown
-                  name="status"
-                  aria-label="Call outcome"
-                  defaultValue={student.status}
-                  options={statuses.map((s) => ({
-                    value: s,
-                    label: s,
-                    disabled:
-                      !manager &&
-                      student.status === "Do not call" &&
-                      s !== "Do not call",
-                  }))}
-                />
-              </label>
-              <label>
-                Notes / next action
-                <textarea
-                  name="note"
-                  maxLength={10000}
-                  placeholder="What should the next caller know?"
-                  rows={3}
-                />
-              </label>
-              <label>
-                Follow-up date & time
-                <input type="datetime-local" name="due" />
-              </label>
-              <small>
-                Required with next-action notes for a scheduled follow-up.
-              </small>
-              <button disabled={busy}>Save call update</button>
-              {error && (
-                <p role="alert" className="error">
-                  {error}
-                </p>
-              )}
-            </form>
-            <h2>Conversation history</h2>
-            <div className="timeline">
-              {data.activities
-                .filter((a) => a.student_id === student.id)
-                .map((a) => (
-                  <article key={a.id}>
-                    <small>
-                      {a.author} · {date(a.created_at)}
-                    </small>
-                    <h3>{a.outcome || a.kind}</h3>
-                    <p>{a.note || "No additional notes"}</p>
-                  </article>
-                ))}
-            </div>
-            <Pagination
-              value={data.historyPagination}
-              onChange={setHistoryPage}
-            />
+                )}
+                <form
+                  className="outcome-form"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const fields = Object.fromEntries(new FormData(form));
+                    if (
+                      await action({
+                        action: "outcome",
+                        id: student.id,
+                        ...fields,
+                        due: fields.due
+                          ? new Date(fields.due).toISOString()
+                          : null,
+                      })
+                    )
+                      form.reset();
+                  }}
+                >
+                  <h2>Record a conversation</h2>
+                  <label>
+                    Call outcome
+                    <Dropdown
+                      name="status"
+                      aria-label="Call outcome"
+                      defaultValue={student.status}
+                      options={statuses.map((s) => ({
+                        value: s,
+                        label: s,
+                        disabled:
+                          !manager &&
+                          student.status === "Do not call" &&
+                          s !== "Do not call",
+                      }))}
+                    />
+                  </label>
+                  <label>
+                    Notes / next action
+                    <textarea
+                      name="note"
+                      maxLength={10000}
+                      placeholder="What should the next caller know?"
+                      rows={3}
+                    />
+                  </label>
+                  <label>
+                    Follow-up date & time
+                    <input type="datetime-local" name="due" />
+                  </label>
+                  <small>
+                    Required with next-action notes for a scheduled follow-up.
+                  </small>
+                  <button disabled={busy}>Save call update</button>
+                  {error && (
+                    <p role="alert" className="error">
+                      {error}
+                    </p>
+                  )}
+                </form>
+                {more && profile && (
+                  <>
+                    <h2>Conversation history</h2>
+                    <div className="timeline">
+                      {profile.activities
+                        .filter((a) => a.student_id === student.id)
+                        .map((a) => (
+                          <article key={a.id}>
+                            <small>
+                              {a.author} · {date(a.created_at)}
+                            </small>
+                            <h3>{a.outcome || a.kind}</h3>
+                            <p>{a.note || "No additional notes"}</p>
+                          </article>
+                        ))}
+                    </div>
+                    <Pagination
+                      value={profile.historyPagination}
+                      onChange={setHistoryPage}
+                    />
+                  </>
+                )}
+              </>
+            )}
           </section>
         </div>
       )}

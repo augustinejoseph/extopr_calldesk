@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { importFields, suggestMapping, prepareRow } from "../lib/import.mjs";
 import Dropdown from "./dropdown";
+import { LayoutShimmer } from "./shimmer";
 async function send(input) {
   const response = await fetch("/api/imports", {
     method: "POST",
@@ -451,7 +452,7 @@ export default function ImportStudents({ onChanged }) {
               Close report
             </button>
           </div>
-          {reportLoading && <p role="status">Loading errors…</p>}
+          {reportLoading && <LayoutShimmer detail />}
           {reportError && (
             <p role="alert" className="error">
               {reportError}

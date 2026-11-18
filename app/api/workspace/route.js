@@ -12,9 +12,40 @@ export async function GET(request) {
   const { page, limit, offset } = pagination(params);
   const view = params.get("view") || "Students";
   const detail = params.get("student");
-  if (detail && !/^[0-9a-f-]{36}$/i.test(detail))
+  if (
+    detail &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      detail,
+    )
+  )
     return Response.json({ error: "Invalid student" }, { status: 400 });
-  const access = sql`(${user.role === "manager"} or s.owner_id=${user.id})`;
+  const access =
+    user.role === "manager" ? sql`true` : sql`s.owner_id=${user.id}`;
+  if (detail) {
+    const more = params.get("more") === "1";
+    const historyPage = pagination(params, "historyPage");
+    const [student = null] = more
+      ? await sql`select s.*,u.name as owner_name from students s left join users u on u.id=s.owner_id where s.id=${detail} and ${access}`
+      : await sql`select s.id,s.name,s.phone,s.status,(select note from activities where student_id=s.id and kind='call' order by created_at desc,id desc limit 1) as notes from students s where s.id=${detail} and ${access}`;
+    let activities = [],
+      total = 0;
+    if (student && more) {
+      const [history, counts] = await Promise.all([
+        sql`select a.*,u.name as author from activities a join users u on u.id=a.author_id where a.student_id=${detail} order by a.created_at desc,a.id desc limit ${limit} offset ${historyPage.offset}`,
+        sql`select count(*)::int as total from activities where student_id=${detail}`,
+      ]);
+      activities = history;
+      total = counts[0].total;
+    }
+    return Response.json(
+      {
+        student,
+        activities,
+        historyPagination: { page: historyPage.page, limit, total },
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const search = params.get("search") || "";
   const status = params.get("status") || "";
   const follow = params.get("follow") || "";
@@ -29,17 +60,22 @@ export async function GET(request) {
   )
     return Response.json({ error: "Invalid date range" }, { status: 400 });
   const filter = sql`${access}
-    and (${view !== "Unassigned pool"} or s.owner_id is null)
-    and (${!status} or s.status=${status})
-    and (${!search} or strpos(lower(concat_ws(' ',s.name,s.phone,s.client,s.course)),lower(${search}))>0)
-    and (${!follow} or exists(select 1 from followups f where f.student_id=s.id and f.completed_at is null
-      and ((${follow === "overdue"} and f.due_at<now()) or (${follow === "today"} and f.due_at>=${start}::timestamptz and f.due_at<${end}::timestamptz))))`;
+    ${view === "Unassigned pool" ? sql`and s.owner_id is null` : sql``}
+    ${status ? sql`and s.status=${status}` : sql``}
+    ${search ? sql`and strpos(lower(concat_ws(' ',s.name,s.phone,s.client,s.course)),lower(${search}))>0` : sql``}
+    ${
+      follow
+        ? sql`and exists(select 1 from followups f where f.student_id=s.id and f.completed_at is null
+      and ${follow === "overdue" ? sql`f.due_at<now()` : sql`f.due_at>=${start}::timestamptz and f.due_at<${end}::timestamptz`})`
+        : sql``
+    }`;
   let students = [],
     activities = [],
     followups = [],
     duplicates = [],
     total = 0;
   let users = [];
+  let listUsers = Promise.resolve([]);
   if (user.role === "manager" && view === "Team") {
     const [count] =
       await sql`select count(*)::int as total from users where role='telecaller'`;
@@ -50,8 +86,7 @@ export async function GET(request) {
     user.role === "manager" &&
     ["Students", "Unassigned pool"].includes(view)
   ) {
-    users =
-      await sql`select id,name,role,deleted_at from users where role='telecaller' and deleted_at is null order by name,id`;
+    listUsers = sql`select id,name,role,deleted_at from users where role='telecaller' and deleted_at is null order by name,id`;
   }
   let stats = {
     total: 0,
@@ -83,21 +118,21 @@ export async function GET(request) {
     }
   }
   if (["Students", "Unassigned pool"].includes(view)) {
-    const [count] =
-      await sql`select count(*)::int as total from students s where ${filter}`;
-    total = count.total;
-    students =
-      await sql`select s.id,s.name,s.phone,s.client,s.course,s.status,s.owner_id,u.name as owner_name from students s left join users u on u.id=s.owner_id where ${filter} order by s.created_at desc,s.id desc limit ${limit} offset ${offset}`;
-    if (students.length)
-      followups =
-        await sql`select distinct on (student_id) id,student_id,due_at from followups where student_id in ${sql(students.map((s) => s.id))} and completed_at is null order by student_id,due_at,id`;
+    const [counts, rows, owners] = await Promise.all([
+      sql`select count(*)::int as total from students s where ${filter}`,
+      sql`select s.id,s.name,s.phone,s.status,(select note from activities where student_id=s.id and kind='call' order by created_at desc,id desc limit 1) as notes from students s where ${filter} order by s.created_at desc,s.id desc limit ${limit} offset ${offset}`,
+      listUsers,
+    ]);
+    total = counts[0].total;
+    students = rows;
+    users = owners;
   } else if (view === "Follow-ups") {
     total = stats.pending;
     followups =
       await sql`select f.*,s.name as student_name,u.name as owner_name from followups f join students s on s.id=f.student_id left join users u on u.id=s.owner_id where ${access} and f.completed_at is null order by f.due_at,f.id limit ${limit} offset ${offset}`;
   }
   let duplicateTotal = 0;
-  if (user.role === "manager") {
+  if (user.role === "manager" && view === "Duplicate review") {
     const [count] =
       await sql`select count(*)::int as total from duplicate_reviews where resolved_at is null`;
     duplicateTotal = count.total;
@@ -110,17 +145,6 @@ export async function GET(request) {
   let student = null,
     historyTotal = 0;
   const historyPage = pagination(params, "historyPage");
-  if (detail) {
-    [student = null] =
-      await sql`select s.*,u.name as owner_name from students s left join users u on u.id=s.owner_id where s.id=${detail} and ${access}`;
-    if (student) {
-      const [count] =
-        await sql`select count(*)::int as total from activities where student_id=${detail}`;
-      historyTotal = count.total;
-      activities =
-        await sql`select a.*,u.name as author from activities a join users u on u.id=a.author_id where a.student_id=${detail} order by a.created_at desc,a.id desc limit ${limit} offset ${historyPage.offset}`;
-    }
-  }
   return Response.json(
     {
       user,
@@ -175,21 +199,24 @@ export async function POST(request) {
           if (!account) throw Error("Choose an active telecaller");
         }
         const students =
-          await tx`select * from students where id in ${tx(input.ids)} for update`;
+          await tx`select id,owner_id from students where id in ${tx(input.ids)} for update`;
         const names = await tx`select id,name from users`;
         const ownerName = (id) =>
           names.find((u) => u.id === id)?.name || "unassigned";
-        for (const s of students) {
-          await tx`update students set owner_id=${owner} where id=${s.id}`;
-          await history(
-            s.id,
-            "assignment",
-            `Ownership changed from ${ownerName(s.owner_id)} to ${ownerName(owner)}`,
-          );
+        if (students.length) {
+          await tx`update students set owner_id=${owner} where id in ${tx(students.map((s) => s.id))}`;
+          await tx`insert into activities ${tx(
+            students.map((s) => ({
+              student_id: s.id,
+              author_id: user.id,
+              kind: "assignment",
+              note: `Ownership changed from ${ownerName(s.owner_id)} to ${ownerName(owner)}`,
+            })),
+          )}`;
         }
       } else if (input.action === "outcome") {
         const [s] =
-          await tx`select * from students where id=${input.id} for update`;
+          await tx`select id,owner_id,status from students where id=${input.id} for update`;
         if (!s) throw Error("Student not found");
         const note = String(input.note || "").trim();
         if (note.length > 10000) throw Error("Note too long");
@@ -230,12 +257,15 @@ export async function POST(request) {
           await tx`update users set deleted_at=now() where id=${input.id}`;
           const students =
             await tx`select id from students where owner_id=${input.id} for update`;
-          for (const s of students)
-            await history(
-              s.id,
-              "assignment",
-              `${account.name} deactivated; student released to unassigned pool`,
-            );
+          if (students.length)
+            await tx`insert into activities ${tx(
+              students.map((s) => ({
+                student_id: s.id,
+                author_id: user.id,
+                kind: "assignment",
+                note: `${account.name} deactivated; student released to unassigned pool`,
+              })),
+            )}`;
           await tx`update students set owner_id=null where owner_id=${input.id}`;
         }
       } else if (input.action === "duplicate") {
