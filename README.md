@@ -24,7 +24,21 @@ The service worker enables the PWA lifecycle but deliberately does not cache per
 
 ## Import policy
 
-First worksheet, header row, 1–1000 records, 5 MB maximum client-side. Map name and phone (required), email and course (optional); provide a client label. All rows validate in a transaction. Ten-digit phone numbers receive India’s country code; provide country codes for other regions. Exact normalized-phone matches go to manual review. Review links the source to an existing student without changing their details, or creates a separate student. Original worksheet fields and mapped records remain in source_records. Reuploads intentionally enter manual review rather than silently overwriting data.
+Files are parsed in the browser: first worksheet, headers in row 1, up to 100,000 rows and 20 MB. XLSX, XLS and CSV are supported. Managers map required student name / phone and optional email, course, district, sub district, father name, gender, community, group, address, pincode and school name. Suggested mappings remain editable. Unmapped columns are stored in `extra_fields`; original rows are retained in `source_records`. Numeric Excel phone values are read as numbers rather than scientific display strings.
+
+Only row data is uploaded, in requests of up to 200 rows (also bounded by payload size). Each chunk uses bulk SQL inserts in a transaction. Valid rows are committed; invalid rows are skipped with worksheet row numbers and reasons. Ten-digit numbers receive India’s country code. Normalized-phone matches, including matches within the same chunk, are saved for manual review without overwriting existing students. A manager can link the incoming source or create a separate student with all imported fields.
+
+Import history shows uploader, time, mapping, status, processed rows, created students, records sent to review and errors, with downloadable JSON error reports. Retrying in the same tab continues the import; chunk retries are idempotent. After a tab reload, delete the incomplete import before reuploading. Imports are serialized with duplicate decisions and deletion to preserve consistency.
+
+Managers can permanently delete an import by typing its filename. Students created by that import, their activities and follow-ups, and the import’s source records, reviews and chunk results are deleted transactionally. Existing students remain. Other imports’ source data is retained; if their matching student is deleted, linked incoming records return to review. Legacy imports remain visible but cannot be deleted because their creation provenance is unknown.
+
+Apply the additive schema migration to an existing installation with `node --env-file=.env.local scripts/migrate.mjs`. It preserves existing records and does not require bootstrap manager credentials. `npm test` runs policy/import validation tests. An opt-in database integration test creates and drops its own temporary database on a local PostgreSQL server:
+
+```sh
+IMPORT_TEST_DATABASE_URL=postgres://localhost/postgres node --test tests/import-db.test.mjs
+```
+
+Optionally set `IMPORT_TEST_FILE` to an XLSX path to test all of its rows through the bulk API against that temporary database. The test stubs authentication; live browser acceptance remains separate.
 
 Manager student-detail editing is not yet exposed. Managers can record outcomes and lift DNC; callers cannot. Follow-up times use the device timezone for entry and UTC for storage. Pending follow-up responsibility derives from current student ownership. Deactivated users are checked on every request; restoration never reclaims students.
 

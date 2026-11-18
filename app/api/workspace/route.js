@@ -1,10 +1,7 @@
+import { prepareRow } from "../../../lib/import.mjs";
 import { db } from "../../../lib/db.mjs";
 import { currentUser, sameOrigin, hashPassword } from "../../../lib/auth.mjs";
-import {
-  canAccess,
-  normalizePhone,
-  validateOutcome,
-} from "../../../lib/policy.mjs";
+import { canAccess, validateOutcome } from "../../../lib/policy.mjs";
 export async function GET() {
   const user = await currentUser();
   if (!user)
@@ -22,7 +19,7 @@ export async function GET() {
       : [];
   const duplicates =
     user.role === "manager"
-      ? await sql`select d.*,s.name as candidate_name,s.phone as candidate_phone from duplicate_reviews d join students s on s.id=d.candidate_id where d.resolved_at is null`
+      ? await sql`select d.*,s.name as candidate_name,s.phone as candidate_phone from duplicate_reviews d left join students s on s.id=d.candidate_id where d.resolved_at is null`
       : [];
   return Response.json(
     { user, students, activities, followups, users, duplicates },
@@ -49,8 +46,8 @@ export async function POST(request) {
       const manager = () => {
         if (user.role !== "manager") throw Error("Manager access required");
       };
-      const history = async (id, kind, note, outcome = null) =>
-        tx`insert into activities(student_id,author_id,kind,note,outcome) values(${id},${user.id},${kind},${note},${outcome})`;
+      const history = async (id, kind, note, outcome = null, batchId = null) =>
+        tx`insert into activities(student_id,author_id,kind,note,outcome,import_batch_id) values(${id},${user.id},${kind},${note},${outcome},${batchId})`;
       if (input.action === "assign") {
         manager();
         if (
@@ -129,62 +126,37 @@ export async function POST(request) {
             );
           await tx`update students set owner_id=null where owner_id=${input.id}`;
         }
-      } else if (input.action === "import") {
-        manager();
-        if (
-          !Array.isArray(input.rows) ||
-          !input.rows.length ||
-          input.rows.length > 1000 ||
-          !input.client?.trim()
-        )
-          throw Error("Provide client and 1–1000 mapped rows");
-        // Serialize imports so simultaneous batches cannot bypass phone review.
-        await tx`select pg_advisory_xact_lock(823407)`;
-        const [batch] =
-          await tx`insert into import_batches(filename,client,author_id) values(${String(input.filename || "upload")},${input.client.trim()},${user.id}) returning id`;
-        for (const raw of input.rows) {
-          const phone = normalizePhone(raw.phone);
-          if (!raw.name?.trim() || phone.length < 10 || phone.length > 15)
-            throw Error("Every row needs a name and valid phone number");
-          const [existing] =
-            await tx`select id from students where phone=${phone} limit 1`;
-          const record = { ...raw, phone, client: input.client.trim() };
-          if (existing) {
-            await tx`insert into duplicate_reviews(batch_id,candidate_id,raw) values(${batch.id},${existing.id},${tx.json(record)})`;
-            await tx`insert into source_records(batch_id,student_id,raw) values(${batch.id},${existing.id},${tx.json(record)})`;
-          } else {
-            const [s] =
-              await tx`insert into students(name,phone,email,course,client) values(${raw.name.trim()},${phone},${String(raw.email || "")},${String(raw.course || "")},${input.client.trim()}) returning id`;
-            await tx`insert into source_records(batch_id,student_id,raw) values(${batch.id},${s.id},${tx.json(record)})`;
-            await history(
-              s.id,
-              "import",
-              `Imported from ${input.filename} · ${input.client}`,
-            );
-          }
-        }
       } else if (input.action === "duplicate") {
         manager();
+        await tx`select pg_advisory_xact_lock(823407)`;
         const [review] =
           await tx`select * from duplicate_reviews where id=${input.id} and resolved_at is null for update`;
         if (!review) throw Error("Review already resolved");
         if (!["keep", "link"].includes(input.decision))
           throw Error("Invalid decision");
+        if (input.decision === "link" && !review.candidate_id)
+          throw Error(
+            "The matching student was deleted; keep this record as a separate student",
+          );
         if (input.decision === "keep") {
           const r = review.raw;
           const [s] =
-            await tx`insert into students(name,phone,email,course,client) values(${r.name},${r.phone},${r.email || ""},${r.course || ""},${r.client}) returning id`;
-          await tx`update source_records set student_id=${s.id} where batch_id=${review.batch_id} and raw=${tx.json(r)}`;
+            await tx`insert into students ${tx({ ...prepareRow(r, r.client), created_by_import_id: review.batch_id })} returning id`;
+          await tx`update source_records set student_id=${s.id} where (${review.source_id}::uuid is not null and id=${review.source_id}) or (${review.source_id}::uuid is null and batch_id=${review.batch_id} and raw=${tx.json(r)})`;
           await history(
             s.id,
             "import",
             "Manager approved a separate student with shared phone",
+            null,
+            review.batch_id,
           );
         } else
           await history(
             review.candidate_id,
             "import",
             `Additional source linked: ${review.raw.client}. Imported details preserved in source records.`,
+            null,
+            review.batch_id,
           );
         await tx`update duplicate_reviews set resolved_at=now(),decision=${input.decision} where id=${review.id}`;
       } else throw Error("Unknown action");

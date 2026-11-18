@@ -1,10 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
-import { statuses, normalizePhone } from "../lib/policy.mjs";
+import { statuses } from "../lib/policy.mjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { workspacePages } from "../lib/navigation.mjs";
 import Dropdown from "./dropdown";
+import ImportStudents from "./import-students";
+import { importFields } from "../lib/import.mjs";
 const initials = (n) =>
   n
     .split(" ")
@@ -32,10 +34,6 @@ export default function Workspace({ page, studentId = null }) {
     [status, setStatus] = useState(""),
     [follow, setFollow] = useState(""),
     [selected, setSelected] = useState([]),
-    [rows, setRows] = useState([]),
-    [columns, setColumns] = useState([]),
-    [mapping, setMapping] = useState({}),
-    [filename, setFilename] = useState(""),
     [notice, setNotice] = useState("");
   useEffect(() => {
     if (!detail) return;
@@ -236,37 +234,6 @@ export default function Workspace({ page, studentId = null }) {
         ? "Student workspace"
         : "My students"
       : page;
-  async function readFile(file) {
-    setError("");
-    try {
-      if (!file) return;
-      if (file.size > 5 * 1024 * 1024)
-        throw Error("Use a file smaller than 5 MB");
-      const XLSX = await import("xlsx");
-      const book = XLSX.read(await file.arrayBuffer(), { type: "array" });
-      const sheet = book.Sheets[book.SheetNames[0]];
-      const parsed = XLSX.utils.sheet_to_json(sheet, {
-        defval: "",
-        raw: false,
-      });
-      if (!parsed.length || parsed.length > 1000)
-        throw Error("Use a worksheet with 1–1000 rows");
-      setRows(parsed);
-      setColumns(Object.keys(parsed[0]));
-      setFilename(file.name);
-      setMapping(
-        Object.fromEntries(
-          ["name", "phone", "email", "course"].map((k) => [
-            k,
-            Object.keys(parsed[0]).find((c) => c.toLowerCase().includes(k)) ||
-              "",
-          ]),
-        ),
-      );
-    } catch (e) {
-      setError(e.message);
-    }
-  }
   return (
     <div className="shell">
       <aside>
@@ -774,108 +741,7 @@ export default function Workspace({ page, studentId = null }) {
             </div>
           )}
           {page === "Import students" && manager && (
-            <section className="panel padded">
-              <h2>Bring your next conversations in</h2>
-              <p className="muted">
-                Upload XLSX, XLS, or CSV. First worksheet only; up to 1,000 rows
-                and 5 MB per file.
-              </p>
-              <label className="upload">
-                ↥ Choose a student file
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  onChange={(e) => readFile(e.target.files[0])}
-                />
-              </label>
-              {rows.length > 0 && (
-                <form
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    const mapped = rows.map((r) => ({
-                      ...Object.fromEntries(
-                        Object.entries(mapping).map(([k, v]) => [
-                          k,
-                          String(r[v] || ""),
-                        ]),
-                      ),
-                      source: r,
-                    }));
-                    if (
-                      await action({
-                        action: "import",
-                        filename,
-                        client: new FormData(e.currentTarget).get("client"),
-                        rows: mapped,
-                      })
-                    ) {
-                      setRows([]);
-                      setNotice(
-                        "Import complete. Matching phone numbers were sent to duplicate review.",
-                      );
-                    }
-                  }}
-                >
-                  <h3>
-                    {filename} · {rows.length} rows
-                  </h3>
-                  <label>
-                    Client / source name
-                    <input name="client" required />
-                  </label>
-                  <div className="mapping">
-                    {["name", "phone", "email", "course"].map((k) => (
-                      <label key={k}>
-                        {k}
-                        {["name", "phone"].includes(k) ? " *" : ""}
-                        <Dropdown
-                          aria-label={`${k} column`}
-                          value={mapping[k]}
-                          required={["name", "phone"].includes(k)}
-                          onChange={(value) =>
-                            setMapping({ ...mapping, [k]: value })
-                          }
-                          options={[
-                            { value: "", label: "Not mapped" },
-                            ...columns.map((c) => ({ value: c, label: c })),
-                          ]}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                  <h3>Preview · first 5 rows</h3>
-                  <div className="table-scroll">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Name</th>
-                          <th>Normalized phone</th>
-                          <th>Course</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.slice(0, 5).map((r, i) => (
-                          <tr key={i}>
-                            <td>{r[mapping.name] || "Missing name"}</td>
-                            <td>
-                              {normalizePhone(r[mapping.phone]) ||
-                                "Missing phone"}
-                            </td>
-                            <td>{r[mapping.course]}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className="muted">
-                    Phone matches are held for review. Existing details,
-                    ownership, and history are preserved. Invalid rows reject
-                    the whole batch.
-                  </p>
-                  <button disabled={busy}>Confirm import →</button>
-                </form>
-              )}
-            </section>
+            <ImportStudents onChanged={load} />
           )}
           {page === "Duplicate review" && manager && (
             <section className="panel padded">
@@ -891,8 +757,14 @@ export default function Workspace({ page, studentId = null }) {
                 <div className="duplicate" key={d.id}>
                   <div>
                     <small>EXISTING STUDENT</small>
-                    <h3>{d.candidate_name}</h3>
-                    <p>+{d.candidate_phone}</p>
+                    <h3>
+                      {d.candidate_name || "Original matching student removed"}
+                    </h3>
+                    <p>
+                      {d.candidate_phone
+                        ? `+${d.candidate_phone}`
+                        : "Keep the incoming record as a separate student."}
+                    </p>
                   </div>
                   <div>
                     <small>INCOMING RECORD · {d.raw.client}</small>
@@ -900,6 +772,23 @@ export default function Workspace({ page, studentId = null }) {
                     <p>
                       {d.raw.email} · {d.raw.course}
                     </p>
+                    <details>
+                      <summary>Imported details</summary>
+                      {Object.entries(importFields)
+                        .filter(([k]) => d.raw[k])
+                        .map(([k, label]) => (
+                          <p key={k}>
+                            {label}: {d.raw[k]}
+                          </p>
+                        ))}
+                      {Object.entries(d.raw.extra_fields || {}).map(
+                        ([k, v]) => (
+                          <p key={k}>
+                            {k}: {String(v)}
+                          </p>
+                        ),
+                      )}
+                    </details>
                   </div>
                   <div className="actions">
                     <button
@@ -958,6 +847,28 @@ export default function Workspace({ page, studentId = null }) {
             <p>
               {student.client} · {student.course}
             </p>
+            <details>
+              <summary>Imported student details</summary>
+              {Object.entries(importFields)
+                .filter(
+                  ([k]) =>
+                    !["name", "phone", "email", "course"].includes(k) &&
+                    student[k],
+                )
+                .map(([k, label]) => (
+                  <p key={k}>
+                    {label}: {student[k]}
+                  </p>
+                ))}
+              {Object.entries(student.extra_fields || {}).map(([k, v]) => (
+                <p key={k}>
+                  {k}: {String(v)}
+                </p>
+              ))}
+              {manager && student.created_by_import_id && (
+                <p>Import ID: {student.created_by_import_id}</p>
+              )}
+            </details>
             <span className={`badge s${statuses.indexOf(student.status)}`}>
               {student.status}
             </span>

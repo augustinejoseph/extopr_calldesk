@@ -9,6 +9,7 @@ export default function Dropdown({
   onChange,
   name,
   required = false,
+  disabled = false,
   "aria-label": label,
 }) {
   const id = useId(),
@@ -173,6 +174,7 @@ export default function Dropdown({
         value={current}
         onChange={() => {}}
         required={required}
+        disabled={disabled}
         onInvalid={(e) => {
           e.preventDefault();
           trigger.current?.focus();
@@ -181,6 +183,7 @@ export default function Dropdown({
       />
       <button
         ref={trigger}
+        disabled={disabled}
         type="button"
         className="dropdown-trigger"
         role="combobox"
